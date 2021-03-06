@@ -3,6 +3,8 @@
 // the WPILib BSD license file in the root directory of this project.
 
 #include "sysid/analysis/FeedforwardAnalysis.h"
+#include <cmath>
+#include <numeric>
 
 #include "sysid/analysis/AnalysisManager.h"
 #include "sysid/analysis/OLS.h"
@@ -13,36 +15,35 @@ std::tuple<std::vector<double>, double> sysid::CalculateFeedforwardGains(
     const Storage& data, const AnalysisType& type) {
   // Create a raw vector of doubles with our data in it.
   std::vector<double> olsData;
-  olsData.reserve((1 + type.independentVariables) *
-                  (std::get<0>(data).size() + std::get<1>(data).size()));
+  olsData.reserve(4 *
+                  (std::get<0>(data).size() + std::get<1>(data).size() - 2));
 
   // Iterate through the data and add it to our raw vector.
   auto PopulateVector = [&](const std::vector<PreparedData>& d) {
-    for (auto&& pt : d) {
-      // Add the dependent variable (voltage).
-      olsData.push_back(pt.voltage);
-
-      // Add the intercept term (for Ks).
-      olsData.push_back(std::copysign(1, pt.velocity));
-
-      // Add the velocity term (for Kv).
-      olsData.push_back(pt.velocity);
-
-      // Add the acceleration term (for Ka).
-      olsData.push_back(pt.acceleration);
-
-      // Add test-specific variables.
-      if (type.mechanism == Mechanism::kElevator) {
-        // Add the gravity term (for Kg)
-        olsData.push_back(1.0);
-      } else if (type.mechanism == Mechanism::kArm) {
-        // Add the cosine term (for Kcos)
-        olsData.push_back(pt.cos);
-      }
+    for (size_t i = 0; i < d.size() - 1; ++i) {
+      olsData.push_back(d[i + 1].velocity);
+      olsData.push_back(std::copysign(1, d[i].velocity));
+      olsData.push_back(d[i].voltage);
+      olsData.push_back(d[i].velocity);
     }
   };
   PopulateVector(std::get<0>(data));
   PopulateVector(std::get<1>(data));
 
-  return sysid::OLS(olsData, type.independentVariables);
+  auto ols = sysid::OLS(olsData, 3);
+
+  double gamma = std::get<0>(ols)[0];
+  double beta = std::get<0>(ols)[1];
+  double alpha = std::get<0>(ols)[2];
+
+  // Calculate the mean dt.
+  const auto& d = std::get<0>(data);
+  auto dt = (d.back().timestamp - d.front().timestamp) / d.size();
+  wpi::outs() << dt << "\n";
+  wpi::outs().flush();
+
+  return std::make_tuple(
+      std::vector<double>{-gamma / beta, (1 - alpha) / beta,
+                          dt * (alpha - 1) / beta / std::log(alpha)},
+      std::get<1>(ols));
 }
