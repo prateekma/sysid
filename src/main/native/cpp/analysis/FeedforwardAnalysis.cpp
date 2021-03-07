@@ -3,6 +3,7 @@
 // the WPILib BSD license file in the root directory of this project.
 
 #include "sysid/analysis/FeedforwardAnalysis.h"
+
 #include <cmath>
 #include <numeric>
 
@@ -18,9 +19,18 @@ std::tuple<std::vector<double>, double> sysid::CalculateFeedforwardGains(
   olsData.reserve(4 *
                   (std::get<0>(data).size() + std::get<1>(data).size() - 2));
 
+  // Record dts for later averaging
+  std::vector<double> dts;
+
   // Iterate through the data and add it to our raw vector.
   auto PopulateVector = [&](const std::vector<PreparedData>& d) {
     for (size_t i = 0; i < d.size() - 1; ++i) {
+      // Filter out dts from large gaps in the data (e.g., gaps between tests)
+      double dt = d[i + 1].timestamp - d[i].timestamp;
+      if (dt < 1.0) {
+        dts.emplace_back(dt);
+      }
+
       olsData.push_back(d[i + 1].velocity);
       olsData.push_back(std::copysign(1, d[i].velocity));
       olsData.push_back(d[i].voltage);
@@ -32,15 +42,10 @@ std::tuple<std::vector<double>, double> sysid::CalculateFeedforwardGains(
 
   auto ols = sysid::OLS(olsData, 3);
 
+  double dt = std::accumulate(dts.begin(), dts.end(), 0.0) / dts.size();
   double gamma = std::get<0>(ols)[0];
   double beta = std::get<0>(ols)[1];
   double alpha = std::get<0>(ols)[2];
-
-  // Calculate the mean dt.
-  const auto& d = std::get<0>(data);
-  auto dt = (d.back().timestamp - d.front().timestamp) / d.size();
-  wpi::outs() << dt << "\n";
-  wpi::outs().flush();
 
   return std::make_tuple(
       std::vector<double>{-gamma / beta, (1 - alpha) / beta,
