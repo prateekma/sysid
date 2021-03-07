@@ -14,6 +14,9 @@ using namespace sysid;
 
 std::tuple<std::vector<double>, double> sysid::CalculateFeedforwardGains(
     const Storage& data, const AnalysisType& type) {
+  // This implements the OLS algorithm defined in
+  // https://file.tavsys.net/control/sysid-ols.pdf.
+
   // Create a raw vector of doubles with our data in it.
   std::vector<double> olsData;
   olsData.reserve(4 *
@@ -31,10 +34,11 @@ std::tuple<std::vector<double>, double> sysid::CalculateFeedforwardGains(
         dts.emplace_back(dt);
       }
 
+      // x_k+1 = alpha x_k + beta u_k + gamma
       olsData.push_back(d[i + 1].velocity);
-      olsData.push_back(std::copysign(1, d[i].velocity));
-      olsData.push_back(d[i].voltage);
       olsData.push_back(d[i].velocity);
+      olsData.push_back(d[i].voltage);
+      olsData.push_back(std::copysign(1, d[i].velocity));
     }
   };
   PopulateVector(std::get<0>(data));
@@ -43,9 +47,9 @@ std::tuple<std::vector<double>, double> sysid::CalculateFeedforwardGains(
   auto ols = sysid::OLS(olsData, 3);
 
   double dt = std::accumulate(dts.begin(), dts.end(), 0.0) / dts.size();
-  double gamma = std::get<0>(ols)[0];
+  double alpha = std::get<0>(ols)[0];
   double beta = std::get<0>(ols)[1];
-  double alpha = std::get<0>(ols)[2];
+  double gamma = std::get<0>(ols)[2];
 
   return std::make_tuple(
       std::vector<double>{-gamma / beta, (1 - alpha) / beta,
