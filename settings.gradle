@@ -41,11 +41,12 @@ include "sysid-projects:analysis-test"
 // Add robot projects
 include "sysid-projects:drive"
 include "sysid-projects:mechanism"
+include "sysid-projects:romi"
 
 // Make sure each child in sysid-projects points to the correct build file.
-project(":sysid-projects").children.each { child ->
-  child.setBuildFileName("../build.gradle")
-}
+project(":sysid-projects:drive").setBuildFileName("../robot.gradle")
+project(":sysid-projects:mechanism").setBuildFileName("../robot.gradle")
+project(":sysid-projects:romi").setBuildFileName("../romi.gradle")
 
 // Add the main application.
 include "sysid-application"

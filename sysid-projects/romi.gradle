@@ -1,0 +1,147 @@
+plugins {
+  id "cpp"
+  id "google-test-test-suite"
+  id "edu.wpi.first.GradleRIO"
+}
+
+repositories {
+  mavenLocal()
+}
+
+wpi.maven.useFrcMavenLocalDevelopment = true;
+wpi.wpilibVersion = '2022.424242.+'
+wpi.wpimathVersion = '2022.424242.+'
+wpi.imguiVersion = "1.82-1"
+
+// Add static simulation modules.
+// FIXME: version number after Maven publish.
+nativeUtils {
+  dependencyConfigs {
+    wpigui {
+      groupId = "edu.wpi.first.wpigui"
+      artifactId = "wpigui-cpp"
+      headerClassifier = "headers"
+      sourceClassifier = "sources"
+      ext = "zip"
+      version = "2022.424242.+"
+      staticPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+    }
+    libglass {
+      groupId = "edu.wpi.first.glass"
+      artifactId = "libglass"
+      headerClassifier = "headers"
+      sourceClassifier = "sources"
+      ext = "zip"
+      version = "2022.424242.+"
+      staticPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+    }
+    libglassnt {
+      groupId = "edu.wpi.first.glass"
+      artifactId = "libglassnt"
+      headerClassifier = "headers"
+      sourceClassifier = "sources"
+      ext = "zip"
+      version = "2022.424242.+"
+      staticPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+    }
+    halsim_gui {
+      groupId = "edu.wpi.first.halsim"
+      artifactId = "halsim_gui"
+      headerClassifier = "headers"
+      sourceClassifier = "sources"
+      ext = "zip"
+      version = "2022.424242.+"
+      staticPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+    }
+    halsim_ds {
+      groupId = "edu.wpi.first.halsim"
+      artifactId = "halsim_ds_socket"
+      headerClassifier = "headers"
+      sourceClassifier = "sources"
+      ext = "zip"
+      version = "2022.424242.+"
+      staticPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+    }
+    halsim_ws_client {
+      groupId = "edu.wpi.first.halsim"
+      artifactId = "halsim_ws_client"
+      headerClassifier = "headers"
+      sourceClassifier = "sources"
+      ext = "zip"
+      version = "2022.424242.+"
+      staticPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+    }
+    halsim_ws_core {
+      groupId = "edu.wpi.first.halsim"
+      artifactId = "halsim_ws_core"
+      headerClassifier = "headers"
+      sourceClassifier = "sources"
+      ext = "zip"
+      version = "2022.424242.+"
+      staticPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+    }
+  }
+  combinedDependencyConfigs {
+    sim_modules {
+      libraryName = "sim_modules"
+      targetPlatforms.addAll(nativeUtils.wpi.platforms.desktopPlatforms)
+      dependencies <<
+          "halsim_gui_static" << "halsim_ds_static" << "halsim_ws_client_static" <<
+          "halsim_ws_core_static" << "libglassnt_static" <<
+          "libglass_static" << "wpigui_static" << "imgui_static"
+    }
+  }
+}
+
+model {
+  components {
+    frcUserProgram(NativeExecutableSpec) {
+      targetPlatform wpi.platforms.desktop
+
+      sources.cpp {
+        source {
+          srcDir 'src/main/cpp'
+          include '**/*.cpp'
+        }
+        exportedHeaders {
+          srcDir 'src/main/include'
+        }
+      }
+
+      // Defining my dependencies. In this case, WPILib (+ friends), and vendor libraries.
+      binaries.all {
+        nativeUtils.useRequiredLibrary(it, "sim_modules")
+        lib project: ":sysid-library", library: "libsysid", linkage: "static"
+        wpi.deps.vendor.cpp(it)
+        wpi.deps.wpilibStatic(it)
+
+        // Add platform-specific renderer dependencies.
+        if (it.targetPlatform.operatingSystem.isWindows()) {
+          it.linker.args << 'Gdi32.lib' << 'Shell32.lib' << 'd3d11.lib' << 'd3dcompiler.lib'
+        } else if (it.targetPlatform.operatingSystem.isMacOsX()) {
+          it.linker.args << '-framework' << 'Metal' << '-framework' << 'MetalKit' <<
+              '-framework' << 'Cocoa' << '-framework' << 'IOKit' << '-framework' <<
+              'CoreFoundation' << '-framework' << 'CoreVideo' << '-framework' << 'QuartzCore'
+        } else {
+          it.linker.args << '-lX11'
+        }
+      }
+    }
+  }
+  tasks {
+    $.components.frcUserProgram.binaries.each { bin ->
+      if (bin.targetPlatform.name == wpi.platforms.desktop &&
+          bin.name.toLowerCase().contains("release")) {
+        // Create a task that installs the desktop executable.
+        Task copy = project.tasks.create("installDesktopExe", Copy) {
+          from(bin.tasks.install.executableFile)
+          into("$rootDir/sysid-application/src/main/native/resources")
+
+          rename { _ -> "frcUserProgram${project.name.capitalize()}.out" }
+          dependsOn bin.tasks.install
+        }
+        project.build.dependsOn copy
+      }
+    }
+  }
+}

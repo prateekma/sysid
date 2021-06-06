@@ -300,3 +300,6 @@ compile_commands.json
 
 # Generation Config
 config.json
+
+# Dear ImGui config
+imgui.ini

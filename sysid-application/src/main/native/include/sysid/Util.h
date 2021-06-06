@@ -21,8 +21,10 @@
 
 #ifdef _WIN32
 #define LAUNCH "gradlew"
+#define EXE_EXT ".exe"
 #else
 #define LAUNCH "./gradlew"
+#define EXE_EXT ".out"
 #endif
 
 // Based on https://gcc.gnu.org/onlinedocs/cpp/Stringizing.html

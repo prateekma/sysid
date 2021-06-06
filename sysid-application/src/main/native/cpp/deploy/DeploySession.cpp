@@ -38,7 +38,7 @@ std::string_view GetResource_frcUserProgramMechanism_out();
 
 // Lock for Execute(). Only one instance of Execute() should be running at a
 // time (even across separate instances).
-wpi::mutex s_mutex;
+static wpi::mutex s_mutex;
 
 DeploySession::DeploySession(std::string_view team, bool drive,
                              wpi::json config, wpi::Logger& logger)

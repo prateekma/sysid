@@ -25,6 +25,7 @@ includeOtherLibs {
   ^Eigen
   ^fmt/
   ^frc
+  ^hal
   ^imgui
   ^implot\.h$
   ^libssh
