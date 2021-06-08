@@ -42,8 +42,7 @@ Generator::Generator(wpi::Logger& logger) : m_logger{logger} {
   });
 
   // Initialize team number / IP field.
-  m_pTeam =
-      glass::GetStorage("NetworkTables Settings").GetStringRef("serverTeam");
+  m_pTeam = glass::GetStorage().GetStringRef("serverTeam");
 }
 
 void Generator::Display() {
