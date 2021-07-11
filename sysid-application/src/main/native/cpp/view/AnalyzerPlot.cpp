@@ -5,7 +5,9 @@
 #include "sysid/view/AnalyzerPlot.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -14,6 +16,8 @@
 #include <implot.h>
 #include <units/math.h>
 #include <units/time.h>
+#include <wpi/StringExtras.h>
+#include <wpi/array.h>
 
 #include "sysid/Util.h"
 #include "sysid/analysis/AnalysisManager.h"
@@ -33,12 +37,13 @@ static double simSquaredErrorSum = 0.0;
 static int timeSeriesPoints = 0;
 
 template <typename Model>
-static std::vector<std::vector<ImPlotPoint>> PopulateTimeDomainSim(
-    const std::vector<PreparedData>& data,
-    const std::array<units::second_t, 4>& startTimes, size_t step,
-    Model model) {
+static std::shared_ptr<std::vector<std::vector<ImPlotPoint>>>
+PopulateTimeDomainSim(const std::vector<PreparedData>& data,
+                      const std::array<units::second_t, 4>& startTimes,
+                      size_t step, Model model) {
   // Create the vector of ImPlotPoints that will contain our simulated data.
-  std::vector<std::vector<ImPlotPoint>> pts;
+  auto ptr = std::make_shared<std::vector<std::vector<ImPlotPoint>>>();
+  auto& pts = *ptr;
   std::vector<ImPlotPoint> tmp;
 
   auto startTime = data[0].timestamp;
@@ -71,13 +76,23 @@ static std::vector<std::vector<ImPlotPoint>> PopulateTimeDomainSim(
   }
 
   pts.emplace_back(std::move(tmp));
-  return pts;
+  return ptr;
 }
 
-AnalyzerPlot::AnalyzerPlot(wpi::Logger& logger) : m_logger(logger) {
-  // Pre-allocate our vectors with the max data size.
-  for (auto&& title : kChartTitles) {
-    m_filteredData[title].reserve(kMaxSize);
+AnalyzerPlot::AnalyzerPlot(wpi::Logger& logger) : m_logger{logger} {
+  // Create titles for all charts.
+  m_charts[0].title = "Quasistatic Velocity vs. Velocity-Portion Voltage";
+  m_charts[1].title = "Dynamic Acceleration vs. Acceleration-Portion Voltage";
+  m_charts[2].title = "Quasistatic Velocity vs. Time";
+  m_charts[3].title = "Quasistatic Acceleration vs. Time";
+  m_charts[4].title = "Dynamic Velocity vs. Time";
+  m_charts[5].title = "Dynamic Acceleration vs. Time";
+  m_charts[6].title = "Timesteps vs. Time";
+
+  // Pre-allocate filtered data vector with max size. Raw data is not used for
+  // every chart so they can be initialized on a case-by-case basis.
+  for (auto&& chart : m_charts) {
+    chart.filteredData.reserve(kMaxSize);
   }
 }
 
@@ -86,28 +101,31 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
                            const std::vector<double>& ffGains,
                            const std::array<units::second_t, 4>& startTimes,
                            AnalysisType type, std::atomic<bool>& abort) {
+  // Lock mutex to ensure that we don't run multiple of these at once.
+  std::scoped_lock lock{m_mutex};
+
+  // Reference to charts for convenience.
+  auto& ci = m_charts;
+
+  // Perform some basic cleanup on the charts -- clear vectors, and reset
+  // arbitrary storage.
+  for (auto&& chart : m_charts) {
+    chart.data.reset();
+    chart.filteredData.clear();
+    chart.rawData.clear();
+  }
+
+  // Get abbreviation for unit.
+  m_abbreviation = GetAbbreviation(unit);
+
+  // Obtain references to data and feedforward gains for convenience.
   auto& [slow, fast] = filteredData;
   auto& [rawSlow, rawFast] = rawData;
   const auto& Ks = ffGains[0];
   const auto& Kv = ffGains[1];
   const auto& Ka = ffGains[2];
 
-  auto abbreviation = GetAbbreviation(unit);
-  m_velocityLabel = "Velocity (" + abbreviation + " / s)";
-  m_accelerationLabel = "Acceleration (" + abbreviation + " / s^2)";
-
-  std::scoped_lock lock(m_mutex);
-
-  // Clear all data vectors.
-  for (auto it = m_filteredData.begin(); it != m_filteredData.end(); ++it) {
-    it->second.clear();
-  }
-
-  for (auto it = m_rawData.begin(); it != m_rawData.end(); ++it) {
-    it->second.clear();
-  }
-
-  m_dtMeanLine.clear();
+  // Reset parameters for RMSE calculation.
   simSquaredErrorSum = 0;
   timeSeriesPoints = 0;
 
@@ -115,7 +133,6 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
   // allocated.
   auto slowStep = std::ceil(slow.size() * 1.0 / kMaxSize * 4);
   auto fastStep = std::ceil(fast.size() * 1.0 / kMaxSize * 4);
-
   auto rawSlowStep = std::ceil(rawSlow.size() * 1.0 / kMaxSize * 4);
   auto rawFastStep = std::ceil(rawFast.size() * 1.0 / kMaxSize * 4);
 
@@ -141,15 +158,26 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
         return a.acceleration < b.acceleration;
       })->acceleration;
 
+  // Calculate mean time delta.
   units::second_t dtMean = GetMeanTimeDelta(filteredData);
+
+  // Calculate points to show the line of best fit.
+  ci[0].data = std::make_shared<wpi::array<ImPlotPoint, 2>>(
+      ImPlotPoint{Kv * slowMinElement, slowMinElement},
+      ImPlotPoint{Kv * slowMaxElement, slowMaxElement});
+
+  ci[1].data = std::make_shared<wpi::array<ImPlotPoint, 2>>(
+      ImPlotPoint{Ka * fastMinElement, fastMinElement},
+      ImPlotPoint{Ka * fastMaxElement, fastMaxElement});
 
   // Populate quasistatic time-domain graphs and quasistatic velocity vs.
   // velocity-portion voltage graph.
-
   for (size_t i = 0; i < slow.size(); i += slowStep) {
+    // Abort setting data based on the atomic value.
     if (abort) {
       return;
     }
+
     // Calculate portion of voltage that corresponds to change in velocity.
     double Vportion = slow[i].voltage - std::copysign(Ks, slow[i].velocity) -
                       Ka * slow[i].acceleration;
@@ -162,15 +190,12 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
       Vportion -= Kcos * slow[i].cos;
     }
 
-    // Calculate points to show the line of best fit.
-    m_KvFit[0] = ImPlotPoint(Kv * slowMinElement, slowMinElement);
-    m_KvFit[1] = ImPlotPoint(Kv * slowMaxElement, slowMaxElement);
-
-    m_filteredData[kChartTitles[0]].emplace_back(Vportion, slow[i].velocity);
-    m_filteredData[kChartTitles[2]].emplace_back(
-        (slow[i].timestamp).to<double>(), slow[i].velocity);
-    m_filteredData[kChartTitles[3]].emplace_back(
-        (slow[i].timestamp).to<double>(), slow[i].acceleration);
+    // Append data to relevant charts.
+    ci[0].filteredData.emplace_back(Vportion, slow[i].velocity);
+    ci[2].filteredData.emplace_back(slow[i].timestamp.to<double>(),
+                                    slow[i].velocity);
+    ci[3].filteredData.emplace_back(slow[i].timestamp.to<double>(),
+                                    slow[i].acceleration);
 
     if (i > 0) {
       // If the current timestamp is not in the startTimes array, it is the
@@ -181,8 +206,8 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
       if (slow[i].dt > 0_s &&
           std::find(startTimes.begin(), startTimes.end(), slow[i].timestamp) ==
               startTimes.end()) {
-        m_filteredData[kChartTitles[6]].emplace_back(
-            (slow[i].timestamp).to<double>(),
+        ci[6].filteredData.emplace_back(
+            slow[i].timestamp.to<double>(),
             units::millisecond_t{slow[i].dt}.to<double>());
       }
     }
@@ -191,9 +216,11 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
   // Populate dynamic time-domain graphs and dynamic acceleration vs.
   // acceleration-portion voltage graph.
   for (size_t i = 0; i < fast.size(); i += fastStep) {
+    // Abort setting data based on the atomic value.
     if (abort) {
       return;
     }
+
     // Calculate portion of voltage that corresponds to change in acceleration.
     double Vportion = fast[i].voltage - std::copysign(Ks, fast[i].velocity) -
                       Kv * fast[i].velocity;
@@ -206,16 +233,13 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
       Vportion -= Kcos * fast[i].cos;
     }
 
-    // Calculate points to show the line of best fit.
-    m_KaFit[0] = ImPlotPoint(Ka * fastMinElement, fastMinElement);
-    m_KaFit[1] = ImPlotPoint(Ka * fastMaxElement, fastMaxElement);
+    // Append data to relevant charts.
+    ci[1].filteredData.emplace_back(Vportion, fast[i].acceleration);
+    ci[4].filteredData.emplace_back(fast[i].timestamp.to<double>(),
+                                    fast[i].velocity);
+    ci[5].filteredData.emplace_back(fast[i].timestamp.to<double>(),
+                                    fast[i].acceleration);
 
-    m_filteredData[kChartTitles[1]].emplace_back(Vportion,
-                                                 fast[i].acceleration);
-    m_filteredData[kChartTitles[4]].emplace_back(
-        (fast[i].timestamp).to<double>(), fast[i].velocity);
-    m_filteredData[kChartTitles[5]].emplace_back(
-        (fast[i].timestamp).to<double>(), fast[i].acceleration);
     if (i > 0) {
       // If the current timestamp is not in the startTimes array, it is the
       // during a test and should be included. If it is in the startTimes array,
@@ -225,8 +249,8 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
       if (fast[i].dt > 0_s &&
           std::find(startTimes.begin(), startTimes.end(), fast[i].timestamp) ==
               startTimes.end()) {
-        m_filteredData[kChartTitles[6]].emplace_back(
-            (fast[i].timestamp).to<double>(),
+        ci[6].filteredData.emplace_back(
+            fast[i].timestamp.to<double>(),
             units::millisecond_t{fast[i].dt}.to<double>());
       }
     }
@@ -236,48 +260,50 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
       units::math::min(slow.front().timestamp, fast.front().timestamp);
   auto maxTime = units::math::max(slow.back().timestamp, fast.back().timestamp);
 
-  // Set first recorded timestamp to mean
-  m_dtMeanLine.emplace_back(minTime.to<double>(),
-                            units::millisecond_t{dtMean}.to<double>());
+  // Add first and last recorded timestamp to mean.
+  ci[6].data = std::make_shared<wpi::array<ImPlotPoint, 2>>(
+      ImPlotPoint{minTime.to<double>(),
+                  units::millisecond_t{dtMean}.to<double>()},
+      ImPlotPoint{maxTime.to<double>(),
+                  units::millisecond_t{dtMean}.to<double>()});
 
-  // Set last recorded timestamp to mean
-  m_dtMeanLine.emplace_back(maxTime.to<double>(),
-                            units::millisecond_t{dtMean}.to<double>());
-
-  // Populate Raw Slow Time Series Data
+  // Populate raw slow time-domain data.
   for (size_t i = 0; i < rawSlow.size(); i += rawSlowStep) {
-    m_rawData[kChartTitles[2]].emplace_back((rawSlow[i].timestamp).to<double>(),
-                                            rawSlow[i].velocity);
-    m_rawData[kChartTitles[3]].emplace_back((rawSlow[i].timestamp).to<double>(),
-                                            rawSlow[i].acceleration);
+    ci[2].rawData.emplace_back(rawSlow[i].timestamp.to<double>(),
+                               rawSlow[i].velocity);
+    ci[3].rawData.emplace_back(rawSlow[i].timestamp.to<double>(),
+                               rawSlow[i].acceleration);
   }
 
-  // Populate Raw fast Time Series Data
+  // Populate raw fast time-domain data.
   for (size_t i = 0; i < rawFast.size(); i += rawFastStep) {
-    m_rawData[kChartTitles[4]].emplace_back((rawFast[i].timestamp).to<double>(),
-                                            rawFast[i].velocity);
-    m_rawData[kChartTitles[5]].emplace_back((rawFast[i].timestamp).to<double>(),
-                                            rawFast[i].acceleration);
+    ci[4].rawData.emplace_back(rawFast[i].timestamp.to<double>(),
+                               rawFast[i].velocity);
+    ci[5].rawData.emplace_back(rawFast[i].timestamp.to<double>(),
+                               rawFast[i].acceleration);
   }
 
-  // Populate Simulated Time Series Data.
+  // Populate simulated time-domain data.
+  auto& quasistatic = ci[2].data;
+  auto& dynamic = ci[4].data;
+
   if (type == analysis::kElevator) {
     const auto& Kg = ffGains[3];
-    m_quasistaticSim = PopulateTimeDomainSim(
-        rawSlow, startTimes, fastStep, sysid::ElevatorSim{Ks, Kv, Ka, Kg});
-    m_dynamicSim = PopulateTimeDomainSim(rawFast, startTimes, fastStep,
-                                         sysid::ElevatorSim{Ks, Kv, Ka, Kg});
+    quasistatic = PopulateTimeDomainSim(rawSlow, startTimes, fastStep,
+                                        sysid::ElevatorSim{Ks, Kv, Ka, Kg});
+    dynamic = PopulateTimeDomainSim(rawFast, startTimes, fastStep,
+                                    sysid::ElevatorSim{Ks, Kv, Ka, Kg});
   } else if (type == analysis::kArm) {
     const auto& Kcos = ffGains[3];
-    m_quasistaticSim = PopulateTimeDomainSim(rawSlow, startTimes, fastStep,
-                                             sysid::ArmSim{Ks, Kv, Ka, Kcos});
-    m_dynamicSim = PopulateTimeDomainSim(rawFast, startTimes, fastStep,
-                                         sysid::ArmSim{Ks, Kv, Ka, Kcos});
+    quasistatic = PopulateTimeDomainSim(rawSlow, startTimes, fastStep,
+                                        sysid::ArmSim{Ks, Kv, Ka, Kcos});
+    dynamic = PopulateTimeDomainSim(rawFast, startTimes, fastStep,
+                                    sysid::ArmSim{Ks, Kv, Ka, Kcos});
   } else {
-    m_quasistaticSim = PopulateTimeDomainSim(rawSlow, startTimes, fastStep,
-                                             sysid::SimpleMotorSim{Ks, Kv, Ka});
-    m_dynamicSim = PopulateTimeDomainSim(rawFast, startTimes, fastStep,
-                                         sysid::SimpleMotorSim{Ks, Kv, Ka});
+    quasistatic = PopulateTimeDomainSim(rawSlow, startTimes, fastStep,
+                                        sysid::SimpleMotorSim{Ks, Kv, Ka});
+    dynamic = PopulateTimeDomainSim(rawFast, startTimes, fastStep,
+                                    sysid::SimpleMotorSim{Ks, Kv, Ka});
   }
 
   // RMSE = std::sqrt(sum((x_i - x^_i)^2) / N) where sum represents the sum of
@@ -285,79 +311,6 @@ void AnalyzerPlot::SetData(const Storage& rawData, const Storage& filteredData,
   // represents the prediction at the timestep, and N represents the number of
   // points
   m_RMSE = std::sqrt(simSquaredErrorSum / timeSeriesPoints);
-  FitPlots();
-}
-
-void AnalyzerPlot::FitPlots() {
-  // Set the "fit" flag to true.
-  for (auto& f : m_fitNextPlot) {
-    f = true;
-  }
-}
-
-bool AnalyzerPlot::DisplayVoltageDomainPlots(ImVec2 plotSize) {
-  std::unique_lock lock(m_mutex, std::defer_lock);
-
-  if (!lock.try_lock()) {
-    ImGui::Text("Loading %c",
-                "|/-\\"[static_cast<int>(ImGui::GetTime() / 0.05f) & 3]);
-    return false;
-  }
-
-  bool forPicture = plotSize.x != -1;
-
-  // Quasistatic Velocity vs. Velocity Portion Voltage.
-  if (m_fitNextPlot[0]) {
-    ImPlot::FitNextPlotAxes();
-  }
-
-  if (ImPlot::BeginPlot(kChartTitles[0], "Velocity-Portion Voltage",
-                        "Quasistatic Velocity", plotSize, ImPlotFlags_None,
-                        ImPlotAxisFlags_NoGridLines,
-                        ImPlotAxisFlags_NoGridLines)) {
-    // Get a reference to the data that we are plotting.
-    auto& data = m_filteredData[kChartTitles[0]];
-
-    ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
-    ImPlot::PlotScatterG("Filtered Data", Getter, data.data(), data.size());
-
-    ImPlot::SetNextLineStyle(IMPLOT_AUTO_COL, 1.5);
-    ImPlot::PlotLineG("Fit", Getter, m_KvFit, 2);
-
-    ImPlot::EndPlot();
-
-    if (m_fitNextPlot[0]) {
-      m_fitNextPlot[0] = false;
-    }
-  }
-
-  if (m_fitNextPlot[1]) {
-    ImPlot::FitNextPlotAxes();
-  }
-
-  if (forPicture) {
-    ImGui::SameLine();
-  }
-
-  if (ImPlot::BeginPlot(kChartTitles[1], "Acceleration-Portion Voltage",
-                        "Dynamic Acceleration", plotSize, ImPlotFlags_None,
-                        ImPlotAxisFlags_NoGridLines)) {
-    // Get a reference to the data we are plotting.
-    auto& data = m_filteredData[kChartTitles[1]];
-
-    ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
-    ImPlot::PlotScatterG("Filtered Data", Getter, data.data(), data.size());
-
-    ImPlot::SetNextLineStyle(IMPLOT_AUTO_COL, 1.5);
-    ImPlot::PlotLineG("Fit", Getter, m_KaFit, 2);
-
-    ImPlot::EndPlot();
-
-    if (m_fitNextPlot[1]) {
-      m_fitNextPlot[1] = false;
-    }
-  }
-  return true;
 }
 
 static void PlotSimData(std::vector<std::vector<ImPlotPoint>>& data) {
@@ -367,107 +320,102 @@ static void PlotSimData(std::vector<std::vector<ImPlotPoint>>& data) {
   }
 }
 
-static void PlotRawAndFiltered(std::vector<ImPlotPoint>& rawData,
-                               std::vector<ImPlotPoint>& filteredData) {
-  ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
-  ImPlot::PlotScatterG("Raw Data", Getter, rawData.data(), rawData.size());
-  // Plot Filtered Data after Raw data
-  ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
-  ImPlot::PlotScatterG("Filtered Data", Getter, filteredData.data(),
-                       filteredData.size());
-}
-
-bool AnalyzerPlot::DisplayTimeDomainPlots(ImVec2 plotSize) {
-  std::unique_lock lock(m_mutex, std::defer_lock);
-
+bool AnalyzerPlot::Plot(bool grid) {
+  // Check whether plots are still loading; display message if appropriate.
+  std::unique_lock lock{m_mutex, std::defer_lock};
   if (!lock.try_lock()) {
     ImGui::Text("Loading %c",
                 "|/-\\"[static_cast<int>(ImGui::GetTime() / 0.05f) & 3]);
     return false;
   }
 
-  bool forPicture = plotSize.x != -1;
+  // Parameters that need to be adjusted based on whether we want a grid.
+  int rows, cols, flags;
+  if (grid) {
+    rows = 2;
+    cols = 4;
+    flags = ImPlotSubplotFlags_ShareItems;
+  } else {
+    rows = 7;
+    cols = 1;
+    flags = ImPlotSubplotFlags_None;
+  }
 
-  // Iterate through the chart titles for these plots and graph them.
-  for (size_t i = 2; i < 6; ++i) {
-    const char* x = "Time (s)";
-    const char* y =
-        i % 2 == 0 ? m_velocityLabel.c_str() : m_accelerationLabel.c_str();
-    bool isVelocity = (i == 2 || i == 4);
+  // Use subplots to display all plots in a grid.
+  static constexpr std::array<size_t, 7> kOrder{2, 3, 4, 5, 0, 1, 6};
+  if (ImPlot::BeginSubplots("##Combined Diagnostics", rows, cols,
+                            ImVec2(-1, kCombinedPlotSize * rows), flags)) {
+    for (auto i : kOrder) {
+      // Get the chart.
+      auto& chart = m_charts[i];
 
-    // Get a reference to the data we are plotting.
-    auto& filteredData = m_filteredData[kChartTitles[i]];
-    auto& rawData = m_rawData[kChartTitles[i]];
+      // Create axis labels.
+      auto axes = wpi::split(chart.title, " vs. ");
+      auto x = fmt::format("{} ({})", axes.second, i > 1 ? "s" : "V");
 
-    // Generate Sim vs Filtered Plot
-    if (m_fitNextPlot[i]) {
-      ImPlot::FitNextPlotAxes();
-    }
-
-    if (forPicture && i % 4 != 0) {
-      ImGui::SameLine();
-    }
-    if (ImPlot::BeginPlot(kChartTitles[i], x, y, plotSize, ImPlotFlags_None,
-                          ImPlotAxisFlags_NoGridLines)) {
-      // Set Legend Location:
-      ImPlot::SetLegendLocation(ImPlotLocation_NorthEast,
-                                ImPlotOrientation_Vertical, false);
-
-      // Plot Raw and Filtered Data
-      PlotRawAndFiltered(rawData, filteredData);
-
-      // Plot Simulation Data for Velocity Data
-      if (isVelocity) {
-        PlotSimData((i == 2) ? m_quasistaticSim : m_dynamicSim);
+      std::string y{axes.first};
+      if (i < 6) {
+        if (i % 2 == 0) {
+          y = fmt::format("{} ({} / s)", y, m_abbreviation);
+        } else {
+          y = fmt::format("{} ({} / s^2)", y, m_abbreviation);
+        }
+      } else {
+        y += " (ms)";
       }
 
-      // Disable constant resizing for Accel Plot
-      if (m_fitNextPlot[i]) {
-        m_fitNextPlot[i] = false;
+      // Create plot.
+      if (ImPlot::BeginPlot(chart.title.c_str(), x.c_str(), y.c_str(),
+                            ImVec2(-1, 0), ImPlotFlags_None,
+                            ImPlotAxisFlags_NoGridLines)) {
+        // Get a reference to the data that we are plotting.
+        auto& rawData = chart.rawData;
+        auto& data = chart.filteredData;
+
+        // Plot filtered data (common for all plots).
+        ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
+        ImPlot::PlotScatterG("Filtered Data", Getter, data.data(), data.size());
+
+        // Plot items specific to each plot.
+        switch (i) {
+          // Quasistatic Velocity vs. Velocity-Portion Voltage
+          // Dynamic Acceleration vs. Acceleration-Portion Voltage
+          // Timesteps vs. Time
+          case 0:
+          case 1:
+          case 6:
+            ImPlot::SetNextLineStyle(IMPLOT_AUTO_COL, 1.5);
+            ImPlot::PlotLineG(
+                "Fit", Getter,
+                chart.GetStorage<wpi::array<ImPlotPoint, 2>>()->data(), 2);
+            break;
+
+          // Quasistatic Velocity vs. Time
+          // Quasistatic Acceleration vs. Time
+          // Dynamic Velocity vs. Time
+          // Dynamic Acceleration vs. Time
+          case 2:
+          case 3:
+          case 4:
+          case 5:
+            // Plot raw data.
+            ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
+            ImPlot::PlotScatterG("Raw Data", Getter, rawData.data(),
+                                 rawData.size());
+            // Plot simulation.
+            if (i % 2 == 0) {
+              auto st =
+                  chart.GetStorage<std::vector<std::vector<ImPlotPoint>>>();
+              PlotSimData(*st);
+            }
+            break;
+        }
+
+        // End plot.
+        ImPlot::EndPlot();
       }
-
-      ImPlot::EndPlot();
     }
-  }
-
-  if (forPicture) {
-    ImGui::SameLine();
-  }
-
-  ImPlot::SetNextPlotLimitsY(0, 50);
-  if (m_fitNextPlot[6]) {
-    ImPlot::FitNextPlotAxes(true, false, false, false);
-  }
-  if (ImPlot::BeginPlot(kChartTitles[6], "Time (s)", "Change in Time (ms)",
-                        plotSize, ImPlotFlags_None,
-                        ImPlotAxisFlags_NoGridLines)) {
-    // Get a reference to the data we are plotting.
-    auto& data = m_filteredData[kChartTitles[6]];
-
-    ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
-    ImPlot::PlotScatterG("Timesteps", Getter, data.data(), data.size());
-
-    ImPlot::SetNextMarkerStyle(IMPLOT_AUTO, 1, IMPLOT_AUTO_COL, 0);
-
-    ImPlot::PlotLineG("Mean dt", Getter, m_dtMeanLine.data(),
-                      m_dtMeanLine.size());
-
-    ImPlot::EndPlot();
-
-    if (m_fitNextPlot[6]) {
-      m_fitNextPlot[6] = false;
-    }
+    ImPlot::EndSubplots();
   }
   return true;
-}
-
-bool AnalyzerPlot::LoadPlots() {
-  // See if the plots are loaded
-  return DisplayVoltageDomainPlots() && DisplayTimeDomainPlots();
-}
-
-void AnalyzerPlot::DisplayCombinedPlots() {
-  const ImVec2 plotSize{kCombinedPlotSize, kCombinedPlotSize};
-  DisplayVoltageDomainPlots(plotSize);
-  DisplayTimeDomainPlots(plotSize);
 }

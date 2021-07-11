@@ -222,22 +222,9 @@ void Analyzer::Display() {
                                ImGuiCond_Once);
       // Show plots for screenshots
       if (ImGui::BeginPopupModal("Combined Diagnostics")) {
-        // Only fit the plots when the popup first shows as they get messed up
-        // by being set to a different size
-        if (!combinedGraphFit) {
-          m_plot.FitPlots();
-          combinedGraphFit = true;
-        }
-        m_plot.DisplayCombinedPlots();
-        ImGui::SameLine();
-        DisplayFeedforwardGains(true);
-        // Button to close popup.
+        m_plot.Plot(true);
         if (ImGui::Button("Close")) {
           ImGui::CloseCurrentPopup();
-          combinedGraphFit = false;
-
-          // Fit plots afterwards so that the regular plot view isn't messed up
-          m_plot.FitPlots();
         }
         ImGui::EndPopup();
       }
@@ -250,7 +237,7 @@ void Analyzer::Display() {
   ImGui::Begin("Diagnostic Plots");
   // If the plots were already loaded, store the scroll position. Else go to
   // the last recorded scroll position if they have just been initialized
-  bool plotsLoaded = m_plot.LoadPlots();
+  bool plotsLoaded = m_plot.Plot(false);
   if (plotsLoaded) {
     if (m_prevPlotsLoaded) {
       m_graphScroll = ImGui::GetScrollY();

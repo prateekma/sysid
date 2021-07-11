@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -27,17 +28,7 @@ namespace sysid {
  */
 class AnalyzerPlot {
  public:
-  // The chart titles of the plots that we wil create.
-  static constexpr const char* kChartTitles[] = {
-      "Quasistatic Velocity vs. Velocity-Portion Voltage",
-      "Dynamic Acceleration vs. Acceleration-Portion Voltage",
-      "Quasistatic Velocity vs. Time",
-      "Quasistatic Acceleration vs. Time",
-      "Dynamic Velocity vs. Time",
-      "Dynamic Acceleration vs. Time",
-      "Timesteps vs. Time"};
-
-  // Size of plots when screenshotting
+  // Size of plots in the combined view.
   static constexpr int kCombinedPlotSize = 300;
 
   /**
@@ -64,60 +55,58 @@ class AnalyzerPlot {
                AnalysisType type, std::atomic<bool>& abort);
 
   /**
-   * Displays voltage-domain plots.
+   * Plots all charts to the screen.
    *
-   * @return Returns true if plots aren't in the loading state
+   * @param grid Whether a grid view should be used. If this is set to false,
+   *             then all plots will be in a single column.
+   *
+   * @return Whether the plots were shown (false when loading).
    */
-  bool DisplayVoltageDomainPlots(ImVec2 plotSize = ImVec2(-1, 0));
+  bool Plot(bool grid);
 
   /**
-   * Displays time-domain plots.
+   * Returns a pointer to the root mean squared error of the fit.
    *
-   * @return Returns true if plots aren't in the loading state
+   * @return A pointer to the root mean squared error of the fit.
    */
-  bool DisplayTimeDomainPlots(ImVec2 plotSize = ImVec2(-1, 0));
-
-  void DisplayCombinedPlots();
-
-  bool LoadPlots();
-
-  void FitPlots();
-
   double* GetRMSE() { return &m_RMSE; }
 
  private:
+  /** Stores information that is needed to plot one chart. */
+  struct ChartInfo {
+    // The chart title.
+    std::string title;
+
+    // Filtered and raw data.
+    std::vector<ImPlotPoint> filteredData;
+    std::vector<ImPlotPoint> rawData;
+
+    // Arbitrary data storage for other data that needs to be plotted.
+    std::shared_ptr<void> data;
+
+    /** Retrieves the arbitrary data storage with the given type. */
+    template <typename T>
+    T* GetStorage() {
+      return static_cast<T*>(data.get());
+    }
+  };
+
+  // Array of chart information.
+  std::array<ChartInfo, 7> m_charts;
+
+  // Unit abbreviation.
+  std::string m_abbreviation;
+
   // The maximum size of each vector (dataset to plot).
   static constexpr size_t kMaxSize = 2048;
 
-  // Stores ImPlotPoint vectors for all of the data.
-  wpi::StringMap<std::vector<ImPlotPoint>> m_filteredData;
-  wpi::StringMap<std::vector<ImPlotPoint>> m_rawData;
-
-  std::string m_velocityLabel;
-  std::string m_accelerationLabel;
-
-  // Stores points for the lines of best fit.
-  ImPlotPoint m_KvFit[2];
-  ImPlotPoint m_KaFit[2];
-
-  // Stores points for simulated time-domain data.
-  std::vector<std::vector<ImPlotPoint>> m_quasistaticSim;
-  std::vector<std::vector<ImPlotPoint>> m_dynamicSim;
-
+  // Root mean squared error.
   double m_RMSE;
-
-  // Stores differences in time deltas
-  std::vector<std::vector<ImPlotPoint>> m_dt;
-  std::vector<ImPlotPoint> m_dtMeanLine;
 
   // Thread safety
   wpi::spinlock m_mutex;
 
   // Logger
   wpi::Logger& m_logger;
-
-  // Stores whether this was the first call to Plot() since setting data.
-  std::array<bool, sizeof(kChartTitles) / sizeof(kChartTitles[0])>
-      m_fitNextPlot{};
 };
 }  // namespace sysid
